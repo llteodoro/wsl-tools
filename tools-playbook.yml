@@ -1,0 +1,328 @@
+---
+- name: Provision Consolidated SRE Study Environment in WSL
+  hosts: localhost
+  connection: local
+  become: yes
+  vars:
+    kubectl_version: "v1.29.0"
+    kind_version: "v0.20.0"
+    kubectx_version: "v0.9.5"
+    helm_version: "v3.14.0"
+    k9s_version: "v0.31.9"
+    yq_version: "v4.43.1"
+    # Safely determine the non-root user running the playbook
+    non_root_user: "{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+
+  tasks:
+
+    # ==========================================================================
+    # PRE-FLIGHT: Wipe stale/conflicting GPG keys and repo list files.
+    # Uses shell globs to catch any auto-generated filename variant.
+    # ==========================================================================
+    - name: Remove all stale Microsoft/VS Code apt list files
+      shell: rm -f /etc/apt/sources.list.d/*vscode* /etc/apt/sources.list.d/*microsoft*code* /etc/apt/trusted.gpg.d/microsoft*
+      args:
+        executable: /bin/bash
+
+    - name: Remove stale HashiCorp apt list files
+      shell: rm -f /etc/apt/sources.list.d/*hashicorp* /etc/apt/trusted.gpg.d/hashicorp*
+      args:
+        executable: /bin/bash
+
+    - name: Remove stale GitHub CLI apt list files
+      shell: rm -f /etc/apt/sources.list.d/*github-cli* /etc/apt/trusted.gpg.d/githubcli*
+      args:
+        executable: /bin/bash
+
+    # --- MICROSOFT VS CODE GPG KEY (modern signed-by, force-overwrite) ---
+    - name: Download and import Microsoft GPG key into keyrings
+      shell: >
+        curl -fsSL https://packages.microsoft.com/keys/microsoft.asc |
+        gpg --dearmor -o /usr/share/keyrings/microsoft.gpg
+      args:
+        executable: /bin/bash
+
+    - name: Add VS Code repository (signed-by modern keyring)
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main"
+        state: present
+        filename: vscode
+
+    # --- HASHICORP GPG KEY (modern signed-by, fixes legacy keyring warning) ---
+    - name: Download and import HashiCorp GPG key into keyrings
+      shell: >
+        curl -fsSL https://apt.releases.hashicorp.com/gpg |
+        gpg --dearmor -o /usr/share/keyrings/hashicorp.gpg
+      args:
+        executable: /bin/bash
+
+    - name: Add HashiCorp repository (signed-by modern keyring)
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/usr/share/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com jammy main"
+        state: present
+        filename: hashicorp
+
+    # --- GITHUB CLI GPG KEY (modern signed-by) ---
+    - name: Download and import GitHub CLI GPG key into keyrings
+      shell: >
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg |
+        gpg --dearmor -o /usr/share/keyrings/githubcli.gpg
+      args:
+        executable: /bin/bash
+
+    - name: Add GitHub CLI repository (signed-by modern keyring)
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/usr/share/keyrings/githubcli.gpg] https://cli.github.com/packages stable main"
+        state: present
+        filename: github-cli
+
+    # --- 1. CORE DEPENDENCIES ---
+    - name: Update APT cache and install core packages
+      apt:
+        name:
+          - curl
+          - git
+          - unzip
+          - apt-transport-https
+          - ca-certificates
+          - software-properties-common
+          - gnupg
+          - ansible
+          - docker.io
+          - python3
+          - zsh
+          - fzf          # fuzzy finder — powers kubectx/kubens selectbox + Ctrl-R
+          - bat          # syntax-highlighted cat replacement
+          - eza          # modern ls with git status and icons
+          - direnv       # auto-load .envrc per directory
+          - jq           # JSON processor (kubectl, terraform output)
+          - gh           # GitHub CLI
+        state: present
+        update_cache: yes
+
+    # --- 2. KUBERNETES TOOLING ---
+    - name: Install kubectl
+      get_url:
+        url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/amd64/kubectl"
+        dest: /usr/local/bin/kubectl
+        mode: '0755'
+
+    - name: Install Kind
+      get_url:
+        url: "https://kind.sigs.k8s.io/dl/{{ kind_version }}/kind-linux-amd64"
+        dest: /usr/local/bin/kind
+        mode: '0755'
+
+    - name: Download kubectx and kubens archives
+      get_url:
+        url: "https://github.com/ahmetb/kubectx/releases/download/{{ kubectx_version }}/{{ item }}_{{ kubectx_version }}_linux_x86_64.tar.gz"
+        dest: "/tmp/{{ item }}.tar.gz"
+      loop:
+        - kubectx
+        - kubens
+
+    - name: Extract and install kubectx and kubens
+      unarchive:
+        src: "/tmp/{{ item }}.tar.gz"
+        dest: "/usr/local/bin/"
+        remote_src: yes
+        mode: '0755'
+      loop:
+        - kubectx
+        - kubens
+
+    # --- 3. INFRASTRUCTURE AS CODE ---
+    - name: Install Terraform
+      apt:
+        name: terraform
+        state: present
+
+    # --- 3b. HELM ---
+    - name: Install Helm
+      shell: >
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      args:
+        executable: /bin/bash
+        creates: /usr/local/bin/helm
+
+    # --- 3c. K9S ---
+    - name: Download k9s
+      get_url:
+        url: "https://github.com/derailed/k9s/releases/download/{{ k9s_version }}/k9s_Linux_amd64.tar.gz"
+        dest: /tmp/k9s.tar.gz
+
+    - name: Install k9s
+      unarchive:
+        src: /tmp/k9s.tar.gz
+        dest: /usr/local/bin/
+        remote_src: yes
+        include:
+          - k9s
+        mode: '0755'
+
+    # --- 3d. YQ ---
+    - name: Install yq (YAML processor)
+      get_url:
+        url: "https://github.com/mikefarah/yq/releases/download/{{ yq_version }}/yq_linux_amd64"
+        dest: /usr/local/bin/yq
+        mode: '0755'
+
+    # --- 4. VS CODE ---
+    - name: Install VS Code
+      apt:
+        name: code
+        state: present
+        update_cache: yes
+
+    # --- 5. TERMINAL PRODUCTIVITY (ZSH & PLUGINS) ---
+    - name: Ensure target directories exist for Zsh plugins
+      file:
+        path: "/home/{{ non_root_user }}/.zsh"
+        state: directory
+        owner: "{{ non_root_user }}"
+        mode: '0755'
+
+    - name: Clone zsh-autosuggestions
+      git:
+        repo: https://github.com/zsh-users/zsh-autosuggestions
+        dest: "/home/{{ non_root_user }}/.zsh/zsh-autosuggestions"
+      become: yes
+      become_user: "{{ non_root_user }}"
+
+    - name: Clone zsh-completions
+      git:
+        repo: https://github.com/zsh-users/zsh-completions
+        dest: "/home/{{ non_root_user }}/.zsh/zsh-completions"
+      become: yes
+      become_user: "{{ non_root_user }}"
+
+    - name: Clone zsh-syntax-highlighting
+      git:
+        repo: https://github.com/zsh-users/zsh-syntax-highlighting
+        dest: "/home/{{ non_root_user }}/.zsh/zsh-syntax-highlighting"
+      become: yes
+      become_user: "{{ non_root_user }}"
+
+    - name: Clone zsh-history-substring-search
+      git:
+        repo: https://github.com/zsh-users/zsh-history-substring-search
+        dest: "/home/{{ non_root_user }}/.zsh/zsh-history-substring-search"
+      become: yes
+      become_user: "{{ non_root_user }}"
+
+    - name: Clone Powerlevel10k theme
+      git:
+        repo: https://github.com/romkatv/powerlevel10k.git
+        dest: "/home/{{ non_root_user }}/powerlevel10k"
+        depth: 1
+      become: yes
+      become_user: "{{ non_root_user }}"
+
+    # --- 6. ZSH ACTIVATION & CONFIGURATION ---
+    - name: Set Zsh as the default shell for the user
+      user:
+        name: "{{ non_root_user }}"
+        shell: /usr/bin/zsh
+      become: yes
+
+    - name: Deploy SRE .zshrc configuration
+      copy:
+        dest: "/home/{{ non_root_user }}/.zshrc"
+        owner: "{{ non_root_user }}"
+        mode: '0644'
+        content: |
+          # Enable Powerlevel10k instant prompt for speed
+          if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
+            source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
+          fi
+
+          # Force 256-color support in terminal
+          export TERM="xterm-256color"
+          autoload -U colors && colors
+
+          # Initialize Zsh plugins
+          source ~/.zsh/zsh-autosuggestions/zsh-autosuggestions.zsh
+          source ~/.zsh/zsh-completions/zsh-completions.plugin.zsh
+          source ~/.zsh/zsh-history-substring-search/zsh-history-substring-search.zsh
+          # zsh-syntax-highlighting MUST be sourced last
+          source ~/.zsh/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+
+          # History substring search: bind up/down arrows
+          bindkey '^[[A' history-substring-search-up
+          bindkey '^[[B' history-substring-search-down
+
+          # fzf integration (fuzzy Ctrl-R history, Ctrl-T file, Alt-C dir)
+          [ -f /usr/share/doc/fzf/examples/key-bindings.zsh ] && source /usr/share/doc/fzf/examples/key-bindings.zsh
+          [ -f /usr/share/doc/fzf/examples/completion.zsh ]   && source /usr/share/doc/fzf/examples/completion.zsh
+          export FZF_DEFAULT_OPTS='--height 40% --layout=reverse --border'
+
+          # direnv hook (auto-loads .envrc per directory)
+          command -v direnv &>/dev/null && eval "$(direnv hook zsh)"
+
+          # Source Powerlevel10k theme
+          source ~/powerlevel10k/powerlevel10k.zsh-theme
+
+          # Load p10k config if it exists
+          [[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
+
+          # Core SRE Aliases
+          alias ls='ls --color=auto'
+          alias ll='eza -lah --git --icons'   # eza: git status + icons
+          alias lt='eza --tree --level=2'      # eza: directory tree
+          alias cat='bat --style=plain'        # bat: syntax-highlighted cat
+          alias grep='grep --color=auto'
+          alias k='kubectl'
+          alias kgp='kubectl get pods'
+          alias kgpa='kubectl get pods -A'
+          alias kga='kubectl get all'
+          alias kns='kubens'                   # fzf selectbox if fzf installed
+          alias kcx='kubectx'                  # fzf selectbox if fzf installed
+          alias tf='terraform'
+          alias d='docker'
+          alias h='helm'
+          alias y='yq'
+
+    - name: Deploy SRE .bashrc configuration
+      copy:
+        dest: "/home/{{ non_root_user }}/.bashrc"
+        owner: "{{ non_root_user }}"
+        mode: '0644'
+        content: |
+          # If not running interactively, don't do anything
+          case $- in
+              *i*) ;;
+                *) return;;
+          esac
+
+          # Force color support
+          export TERM="xterm-256color"
+          force_color_prompt=yes
+
+          # Colored PS1 prompt: user@host:dir $
+          PS1='\[\e[01;32m\]\u@\h\[\e[00m\]:\[\e[01;34m\]\w\[\e[00m\]\$ '
+
+          # Colored ls and grep
+          alias ls='ls --color=auto'
+          alias ll='ls -lah --color=auto'
+          alias la='ls -A --color=auto'
+          alias grep='grep --color=auto'
+          alias fgrep='fgrep --color=auto'
+          alias egrep='egrep --color=auto'
+
+          # Core SRE Aliases
+          alias k='kubectl'
+          alias kgp='kubectl get pods'
+          alias kga='kubectl get all'
+          alias kns='kubens'
+          alias kcx='kubectx'
+          alias tf='terraform'
+          alias d='docker'
+
+          # Enable bash completion if available
+          if ! shopt -oq posix; then
+            if [ -f /usr/share/bash-completion/bash_completion ]; then
+              . /usr/share/bash-completion/bash_completion
+            elif [ -f /etc/bash_completion ]; then
+              . /etc/bash_completion
+            fi
+          fi
