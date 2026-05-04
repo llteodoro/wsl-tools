@@ -1,0 +1,324 @@
+---
+- name: Provision Consolidated SRE Workstation (Ubuntu)
+  hosts: localhost
+  connection: local
+  become: yes
+  vars:
+    kubectl_version: "v1.29.0"
+    kind_version: "v0.20.0"
+    kubectx_version: "v0.9.5"
+    helm_version: "v3.14.0"
+    k9s_version: "v0.31.9"
+    yq_version: "v4.43.1"
+    vagrant_version: "2.3.4"
+    gomplate_version: "v3.11.5"
+    # Detecta o usuário não-root executando a playbook
+    non_root_user: "{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+
+  tasks:
+    # ==========================================================================
+    # PRE-FLIGHT & CLEANUP
+    # ==========================================================================
+    - name: Remove stale apt list and gpg files (Legacy cleanup)
+      shell: rm -f /etc/apt/sources.list.d/*vscode* /etc/apt/sources.list.d/*hashicorp* /etc/apt/sources.list.d/*github-cli* /etc/apt/sources.list.d/*docker* /etc/apt/sources.list.d/*google* /etc/apt/trusted.gpg.d/*
+      args:
+        executable: /bin/bash
+      ignore_errors: true
+
+    # ==========================================================================
+    # REPOSITORIES & GPG KEYS (Modern approach avoiding apt-key warning)
+    # ==========================================================================
+    - name: Ensure keyrings directory exists
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Microsoft GPG Key
+      shell: curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
+      args:
+        creates: /etc/apt/keyrings/microsoft.gpg
+
+    - name: HashiCorp GPG Key
+      shell: curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /etc/apt/keyrings/hashicorp.gpg
+      args:
+        creates: /etc/apt/keyrings/hashicorp.gpg
+
+    - name: GitHub CLI GPG Key
+      shell: curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | gpg --dearmor -o /etc/apt/keyrings/githubcli.gpg
+      args:
+        creates: /etc/apt/keyrings/githubcli.gpg
+
+    - name: Docker GPG Key
+      shell: curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+
+    - name: Google Cloud SDK GPG Key
+      shell: curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /etc/apt/keyrings/google-cloud.gpg
+      args:
+        creates: /etc/apt/keyrings/google-cloud.gpg
+
+    - name: Google Chrome GPG Key
+      shell: curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+      args:
+        creates: /etc/apt/keyrings/google-chrome.gpg
+
+    - name: Add APT Repositories
+      apt_repository:
+        repo: "{{ item.repo }}"
+        filename: "{{ item.filename }}"
+        state: present
+      loop:
+        - { repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main", filename: "vscode" }
+        - { repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com {{ ansible_distribution_release }} main", filename: "hashicorp" }
+        - { repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli.gpg] https://cli.github.com/packages stable main", filename: "github-cli" }
+        - { repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable", filename: "docker" }
+        - { repo: "deb [signed-by=/etc/apt/keyrings/google-cloud.gpg] https://packages.cloud.google.com/apt cloud-sdk main", filename: "google-cloud-sdk" }
+        - { repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main", filename: "google-chrome" }
+
+    - name: Add Golang Backports PPA
+      apt_repository:
+        repo: 'ppa:longsleep/golang-backports'
+        state: present
+
+    # ==========================================================================
+    # SYSTEM PACKAGES (CLI & GUI for Ubuntu Native)
+    # ==========================================================================
+    - name: Install APT Packages
+      apt:
+        name:
+          # Core & System
+          - curl
+          - wget
+          - git
+          - unzip
+          - vim
+          - htop
+          - ncdu
+          - tree
+          - mlocate
+          - mtr
+          - make
+          - jq
+          - bash-completion
+          - python3
+          - python3-pip
+          - python3-venv
+          # Shell & Utilities
+          - zsh
+          - fzf
+          - bat
+          - eza
+          - direnv
+          - gh
+          # Development & IaC
+          - golang-go
+          - google-cloud-cli
+          # Containers
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+          - docker-buildx-plugin
+          # GUI Apps (Ubuntu Desktop)
+          - code
+          - google-chrome-stable
+          - flameshot
+          - fonts-hack
+          - tilix
+          - virtualbox
+          - krita
+        state: present
+        update_cache: yes
+
+    # ==========================================================================
+    # USER CONFIGURATION (Docker)
+    # ==========================================================================
+    - name: Add user to docker group
+      user:
+        name: "{{ non_root_user }}"
+        groups: docker
+        append: yes
+
+    # ==========================================================================
+    # KUBERNETES TOOLING & BINARIES
+    # ==========================================================================
+    - name: Install kubectl
+      get_url:
+        url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/amd64/kubectl"
+        dest: /usr/local/bin/kubectl
+        mode: '0755'
+
+    - name: Install Kind
+      get_url:
+        url: "https://kind.sigs.k8s.io/dl/{{ kind_version }}/kind-linux-amd64"
+        dest: /usr/local/bin/kind
+        mode: '0755'
+
+    - name: Download kubectx and kubens archives
+      get_url:
+        url: "https://github.com/ahmetb/kubectx/releases/download/{{ kubectx_version }}/{{ item }}_{{ kubectx_version }}_linux_x86_64.tar.gz"
+        dest: "/tmp/{{ item }}.tar.gz"
+      loop:
+        - kubectx
+        - kubens
+
+    - name: Extract and install kubectx and kubens
+      unarchive:
+        src: "/tmp/{{ item }}.tar.gz"
+        dest: "/usr/local/bin/"
+        remote_src: yes
+        mode: '0755'
+      loop:
+        - kubectx
+        - kubens
+
+    - name: Install Helm
+      shell: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      args:
+        creates: /usr/local/bin/helm
+
+    - name: Download k9s
+      unarchive:
+        src: "https://github.com/derailed/k9s/releases/download/{{ k9s_version }}/k9s_Linux_amd64.tar.gz"
+        dest: /usr/local/bin/
+        remote_src: yes
+        include:
+          - k9s
+        mode: '0755'
+
+    - name: Install yq
+      get_url:
+        url: "https://github.com/mikefarah/yq/releases/download/{{ yq_version }}/yq_linux_amd64"
+        dest: /usr/local/bin/yq
+        mode: '0755'
+
+    - name: Install Vagrant
+      unarchive:
+        src: "https://releases.hashicorp.com/vagrant/{{ vagrant_version }}/vagrant_{{ vagrant_version }}_linux_amd64.zip"
+        dest: /usr/local/bin
+        remote_src: yes
+
+    - name: Install gomplate
+      get_url:
+        url: "https://github.com/hairyhenderson/gomplate/releases/download/{{ gomplate_version }}/gomplate_linux-amd64"
+        dest: /usr/local/bin/gomplate
+        mode: '0755'
+
+    # ==========================================================================
+    # TFENV (Terraform Version Manager)
+    # ==========================================================================
+    - name: Clone tfenv repository
+      git:
+        repo: "https://github.com/tfutils/tfenv.git"
+        dest: "/opt/tfenv"
+
+    - name: Create symlinks for tfenv
+      file:
+        src: "/opt/tfenv/bin/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        state: link
+        force: yes
+      loop:
+        - tfenv
+        - terraform
+
+    # ==========================================================================
+    # AWS CLI (Official v2 installer instead of outdated pip module)
+    # ==========================================================================
+    - name: Download AWS CLI v2
+      unarchive:
+        src: "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+        dest: "/tmp"
+        remote_src: yes
+
+    - name: Install AWS CLI v2
+      shell: /tmp/aws/install --update
+      args:
+        creates: /usr/local/bin/aws
+
+    # ==========================================================================
+    # VS CODE EXTENSIONS
+    # ==========================================================================
+    - name: Install VS Code Extensions
+      become_user: "{{ non_root_user }}"
+      shell: "code --install-extension {{ item }} --force"
+      loop:
+        - ms-python.python
+        - ms-azuretools.vscode-docker
+        - bbenoist.vagrant
+        - hashicorp.terraform
+        - gruntfuggly.todo-tree
+        - njpwerner.autodocstring
+        - eamodio.gitlens
+      ignore_errors: true
+
+    # ==========================================================================
+    # SHELL CONFIGURATION: OH-MY-ZSH
+    # ==========================================================================
+    - name: Verify if Oh-My-Zsh is installed
+      stat:
+        path: "/home/{{ non_root_user }}/.oh-my-zsh"
+      register: ohmyzsh_dir
+
+    - name: Install Oh-My-Zsh
+      become_user: "{{ non_root_user }}"
+      shell: curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh | bash -s -- --unattended
+      when: not ohmyzsh_dir.stat.exists
+
+    - name: Clone Oh-My-Zsh custom plugins
+      become_user: "{{ non_root_user }}"
+      git:
+        repo: "https://github.com/zsh-users/{{ item }}.git"
+        dest: "/home/{{ non_root_user }}/.oh-my-zsh/custom/plugins/{{ item }}"
+      loop:
+        - zsh-autosuggestions
+        - zsh-syntax-highlighting
+        - zsh-completions
+        - zsh-history-substring-search
+      ignore_errors: true
+
+    - name: Set Zsh as default shell
+      user:
+        name: "{{ non_root_user }}"
+        shell: /usr/bin/zsh
+
+    - name: Configure Oh-My-Zsh Theme (Agnoster)
+      become_user: "{{ non_root_user }}"
+      lineinfile:
+        path: "/home/{{ non_root_user }}/.zshrc"
+        regexp: '^ZSH_THEME='
+        line: 'ZSH_THEME="agnoster"'
+
+    - name: Configure ZSH Plugins
+      become_user: "{{ non_root_user }}"
+      lineinfile:
+        path: "/home/{{ non_root_user }}/.zshrc"
+        regexp: '^plugins='
+        line: 'plugins=(git docker docker-compose kubectl vagrant terraform fzf zsh-autosuggestions zsh-syntax-highlighting zsh-completions zsh-history-substring-search)'
+
+    - name: Add SRE Aliases to .zshrc
+      become_user: "{{ non_root_user }}"
+      blockinfile:
+        path: "/home/{{ non_root_user }}/.zshrc"
+        marker: "# {mark} SRE ALIASES"
+        content: |
+          # Core SRE Aliases
+          alias ls='ls --color=auto'
+          alias ll='eza -lah --git --icons'
+          alias lt='eza --tree --level=2'
+          alias cat='bat --style=plain'
+          alias k='kubectl'
+          alias kgp='kubectl get pods'
+          alias kgpa='kubectl get pods -A'
+          alias kga='kubectl get all'
+          alias kns='kubens'
+          alias kcx='kubectx'
+          alias tf='terraform'
+          alias d='docker'
+          alias h='helm'
+          alias y='yq'
+          
+          # direnv hook
+          eval "$(direnv hook zsh)"
