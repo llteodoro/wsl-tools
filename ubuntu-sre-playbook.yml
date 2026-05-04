@@ -17,6 +17,20 @@
 
   tasks:
     # ==========================================================================
+    # PREREQUISITES
+    # ==========================================================================
+    - name: Update apt cache and install prerequisites for bootstrapping
+      apt:
+        name:
+          - curl
+          - wget
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+        state: present
+        update_cache: yes
+
+    # ==========================================================================
     # PRE-FLIGHT & CLEANUP
     # ==========================================================================
     - name: Remove stale apt list and gpg files (Legacy cleanup)
@@ -89,8 +103,6 @@
       apt:
         name:
           # Core & System
-          - curl
-          - wget
           - git
           - unzip
           - vim
@@ -252,6 +264,7 @@
         - gruntfuggly.todo-tree
         - njpwerner.autodocstring
         - eamodio.gitlens
+        - google.antigravity
       ignore_errors: true
 
     # ==========================================================================
